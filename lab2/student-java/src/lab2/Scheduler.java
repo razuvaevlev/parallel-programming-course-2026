@@ -1,44 +1,260 @@
+
 package lab2;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Semaphore;
 import java.util.function.BooleanSupplier;
 
-/* Этап 1: планировщик, который ведёт настоящие потоки строго по одному (передача хода через семафоры).
- * Этап 2: обнаружение deadlock в главном цикле и корректное завершение застрявших потоков.
- * Внутреннее устройство (свои классы, семафоры, вспомогательные методы для Shared и SchedLock) придумываете сами. */
 public final class Scheduler {
-    /** Если true, каждая операция с общими данными добавляет строку в log. Выставляет runner. */
     boolean logging;
-    /** Лог прогона: строки "<поток>  <операция>", например "A  lock mu", "A  balance -> 100". */
     final List<String> log = new ArrayList<>();
-    /** null, если deadlock не было; иначе "held={a:A, b:B}" (этап 2). */
     String deadlock;
+
+    private final List<Runnable> bodies = new ArrayList<>();
+    private final List<Worker> workers = new ArrayList<>();
+    private final List<SchedLock> locks = new ArrayList<>();
+    private final StringBuilder trace = new StringBuilder();
+
+    private final Semaphore schedulerSem = new Semaphore(0);
+
+    private static final ThreadLocal<Worker> CURRENT = new ThreadLocal<>();
+
+    static final class Worker {
+        final int id;
+        final Runnable body;
+        final Semaphore permit = new Semaphore(0);
+        Thread thread;
+        volatile boolean finished;
+        boolean touched;
+        boolean blocked;
+        SchedLock waitingFor;
+        BooleanSupplier waitingCondition;
+
+        Worker(int id, Runnable body) {
+            this.id = id;
+            this.body = body;
+        }
+    }
 
     public Scheduler() { }
 
-    /** Зарегистрировать поток. Потоки получают буквы A, B, C… в порядке вызова spawn. */
     public void spawn(Runnable body) {
-        throw new UnsupportedOperationException("TODO этап 1: Scheduler.spawn");
+        bodies.add(body);
     }
 
-    /** Запустить потоки и вести их по одному: на каждой паузе спросить strategy.pick(enabled, last). */
+    void register(SchedLock lock) { locks.add(lock); }
+
     public void run(Strategy strategy) {
-        throw new UnsupportedOperationException("TODO этап 1: Scheduler.run");
+        trace.setLength(0);
+        deadlock = null;
+        workers.clear();
+
+        for (int i = 0; i < bodies.size(); i++) {
+            workers.add(new Worker(i, bodies.get(i)));
+        }
+
+        for (Worker w : workers) {
+            w.thread = new Thread(() -> {
+                CURRENT.set(w);
+                CURRENT_SCHEDULER.set(this);
+                try {
+                    yieldTurn(w);
+                    w.touched = true;
+                    w.body.run();
+                } catch (DeadlockAbort ignored) {
+                } finally {
+                    w.finished = true;
+                    schedulerSem.release();
+                    CURRENT.remove();
+                    CURRENT_SCHEDULER.remove();
+                }
+            });
+            w.thread.start();
+        }
+
+        for (Worker w : workers) {
+            w.permit.release();
+            try {
+                schedulerSem.acquire();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(e);
+            }
+        }
+
+        int last = -1;
+
+        while (true) {
+            boolean alive = false;
+            List<Integer> enabled = new ArrayList<>();
+
+            for (Worker w : workers) {
+                if (!w.finished) {
+                    alive = true;
+                    if (!w.blocked) enabled.add(w.id);
+                }
+            }
+
+            if (!alive) {
+                break;
+            }
+
+            if (enabled.isEmpty()) {
+                deadlock = heldLocks();
+                for (Worker stuck : workers) if (!stuck.finished) {
+                    stuck.blocked = false;
+                    stuck.permit.release();
+                }
+                break;
+            }
+
+            int next = strategy.pick(enabled, last);
+            if (next < 0) {
+                deadlock = heldLocks();
+                for (Worker stuck : workers) if (!stuck.finished) stuck.permit.release();
+                break;
+            }
+            Worker w = workers.get(next);
+
+            trace.append((char) ('A' + next));
+            last = next;
+            w.permit.release();
+
+            try {
+                schedulerSem.acquire();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(e);
+            }
+            refreshConditionWaiters();
+        }
+
+        for (Worker w : workers) {
+            try {
+                w.thread.join();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(e);
+            }
+        }
     }
 
-    /** Трасса прогона: буквы потоков, выбранных во всех решениях подряд, например "AAAABB". */
+    private void refreshConditionWaiters() {
+        for (Worker w : workers) {
+            if (!w.finished && w.blocked && w.waitingCondition != null
+                    && w.waitingCondition.getAsBoolean()) {
+                w.blocked = false;
+                w.waitingCondition = null;
+            }
+        }
+    }
+
+    private String heldLocks() {
+        StringBuilder b = new StringBuilder("held={");
+        boolean first = true;
+        for (SchedLock l : locks) if (l.owner >= 0) {
+            if (!first) b.append(", ");
+            first = false;
+            b.append(l.name).append('=').append((char)('A' + l.owner));
+        }
+        return b.append('}').toString();
+    }
+
+    static void lockPause(Worker w, SchedLock lock) {
+        w.blocked = true; w.waitingFor = lock;
+        CURRENT_SCHEDULER.get().schedulerSem.release();
+        w.permit.acquireUninterruptibly();
+        if (CURRENT_SCHEDULER.get().deadlock != null) throw new DeadlockAbort();
+        w.blocked = false; w.waitingFor = null;
+    }
+    static final class DeadlockAbort extends RuntimeException { }
+    static Worker currentWorker() { return current(); }
+    static Scheduler currentScheduler() { current(); return CURRENT_SCHEDULER.get(); }
+    static void wakeLockWaiters(SchedLock lock) {
+        for (Worker w : CURRENT_SCHEDULER.get().workers)
+            if (w.waitingFor == lock) w.blocked = false;
+    }
+
     public String traceString() {
-        throw new UnsupportedOperationException("TODO этап 1: Scheduler.traceString");
+        return trace.toString();
     }
 
-    /** window() из тестовых программ: пауза перед следующей операцией с общими данными обязательна. */
+    private static void yieldTurn(Worker w) {
+        w.touched = false;
+        w.permit.acquireUninterruptibly();
+    }
+
+    private static Worker current() {
+        Worker w = CURRENT.get();
+        if (w == null) {
+            throw new IllegalStateException(
+                "Shared access outside Scheduler thread"
+            );
+        }
+        return w;
+    }
+
+    static void beforeSharedAccess() {
+        Worker w = current();
+
+        if (w.touched) {
+            w.touched = false;
+            Scheduler s = CURRENT_SCHEDULER.get();
+            s.schedulerSem.release();
+            w.permit.acquireUninterruptibly();
+            if (s.deadlock != null) throw new DeadlockAbort();
+        }
+    }
+
+    static void afterSharedAccess() {
+        current().touched = true;
+    }
+
+    static void record(String operation) {
+        Worker w = current();
+        if (w == null) {
+            throw new IllegalStateException(
+                "Operation outside Scheduler thread"
+            );
+        }
+        Scheduler s = findScheduler(w);
+        if (s.logging) {
+            s.log.add((char) ('A' + w.id) + "  " + operation);
+        }
+    }
+
+    private static Scheduler findScheduler(Worker w) {
+        return CURRENT_SCHEDULER.get();
+    }
+
+    private static final ThreadLocal<Scheduler> CURRENT_SCHEDULER =
+        new ThreadLocal<>();
+
     public static void point() {
-        throw new UnsupportedOperationException("TODO этап 1: Scheduler.point");
+        current().touched = true;
+        record("window");
     }
 
-    /** Ждать, пока cond не станет true. До этого поток не попадает в enabled. */
     public static void await(BooleanSupplier cond) {
-        throw new UnsupportedOperationException("TODO этап 1: Scheduler.await");
+        Worker w = current();
+        boolean pauseForPriorAccess = w.touched;
+        w.touched = false;
+        if (pauseForPriorAccess && cond.getAsBoolean()) {
+            CURRENT_SCHEDULER.get().schedulerSem.release();
+            w.permit.acquireUninterruptibly();
+            if (CURRENT_SCHEDULER.get().deadlock != null) throw new DeadlockAbort();
+        }
+        while (!cond.getAsBoolean()) {
+            w.blocked = true;
+            w.waitingCondition = cond;
+            CURRENT_SCHEDULER.get().schedulerSem.release();
+            w.permit.acquireUninterruptibly();
+            if (CURRENT_SCHEDULER.get().deadlock != null) throw new DeadlockAbort();
+            w.blocked = false;
+            w.waitingCondition = null;
+        }
+        record("await done");
+        w.touched = true;
     }
 }
