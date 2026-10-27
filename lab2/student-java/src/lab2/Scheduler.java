@@ -1,44 +1,176 @@
+
 package lab2;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Semaphore;
 import java.util.function.BooleanSupplier;
 
-/* Этап 1: планировщик, который ведёт настоящие потоки строго по одному (передача хода через семафоры).
- * Этап 2: обнаружение deadlock в главном цикле и корректное завершение застрявших потоков.
- * Внутреннее устройство (свои классы, семафоры, вспомогательные методы для Shared и SchedLock) придумываете сами. */
 public final class Scheduler {
-    /** Если true, каждая операция с общими данными добавляет строку в log. Выставляет runner. */
     boolean logging;
-    /** Лог прогона: строки "<поток>  <операция>", например "A  lock mu", "A  balance -> 100". */
     final List<String> log = new ArrayList<>();
-    /** null, если deadlock не было; иначе "held={a:A, b:B}" (этап 2). */
     String deadlock;
+
+    private final List<Runnable> bodies = new ArrayList<>();
+    private final List<Worker> workers = new ArrayList<>();
+    private final StringBuilder trace = new StringBuilder();
+
+    private final Semaphore schedulerSem = new Semaphore(0);
+
+    private static final ThreadLocal<Worker> CURRENT = new ThreadLocal<>();
+
+    private static final class Worker {
+        final int id;
+        final Runnable body;
+        final Semaphore permit = new Semaphore(0);
+        Thread thread;
+        volatile boolean finished;
+        boolean touched;
+
+        Worker(int id, Runnable body) {
+            this.id = id;
+            this.body = body;
+        }
+    }
 
     public Scheduler() { }
 
-    /** Зарегистрировать поток. Потоки получают буквы A, B, C… в порядке вызова spawn. */
     public void spawn(Runnable body) {
-        throw new UnsupportedOperationException("TODO этап 1: Scheduler.spawn");
+        bodies.add(body);
     }
 
-    /** Запустить потоки и вести их по одному: на каждой паузе спросить strategy.pick(enabled, last). */
     public void run(Strategy strategy) {
-        throw new UnsupportedOperationException("TODO этап 1: Scheduler.run");
+        trace.setLength(0);
+        deadlock = null;
+        workers.clear();
+
+        for (int i = 0; i < bodies.size(); i++) {
+            workers.add(new Worker(i, bodies.get(i)));
+        }
+
+        for (Worker w : workers) {
+            w.thread = new Thread(() -> {
+                CURRENT.set(w);
+                CURRENT_SCHEDULER.set(this);
+                try {
+                    yieldTurn(w);
+                    w.body.run();
+                } finally {
+                    w.finished = true;
+                    schedulerSem.release();
+                    CURRENT.remove();
+                    CURRENT_SCHEDULER.remove();
+                }
+            });
+            w.thread.start();
+        }
+
+        int last = -1;
+
+        while (true) {
+            boolean alive = false;
+            List<Integer> enabled = new ArrayList<>();
+
+            for (Worker w : workers) {
+                if (!w.finished) {
+                    alive = true;
+                    enabled.add(w.id);
+                }
+            }
+
+            if (!alive) {
+                break;
+            }
+
+            int next = strategy.pick(enabled, last);
+            Worker w = workers.get(next);
+
+            trace.append((char) ('A' + next));
+            last = next;
+            w.permit.release();
+
+            try {
+                schedulerSem.acquire();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(e);
+            }
+        }
+
+        for (Worker w : workers) {
+            try {
+                w.thread.join();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(e);
+            }
+        }
     }
 
-    /** Трасса прогона: буквы потоков, выбранных во всех решениях подряд, например "AAAABB". */
     public String traceString() {
-        throw new UnsupportedOperationException("TODO этап 1: Scheduler.traceString");
+        return trace.toString();
     }
 
-    /** window() из тестовых программ: пауза перед следующей операцией с общими данными обязательна. */
+    private static void yieldTurn(Worker w) {
+        w.touched = false;
+        w.permit.acquireUninterruptibly();
+    }
+
+    private static Worker current() {
+        Worker w = CURRENT.get();
+        if (w == null) {
+            throw new IllegalStateException(
+                "Shared access outside Scheduler thread"
+            );
+        }
+        return w;
+    }
+
+    static void beforeSharedAccess() {
+        Worker w = current();
+
+        if (w.touched) {
+            w.touched = false;
+            CURRENT_SCHEDULER.get().schedulerSem.release();
+            w.permit.acquireUninterruptibly();
+        }
+    }
+
+    static void afterSharedAccess() {
+        current().touched = true;
+    }
+
+    static void record(String operation) {
+        Worker w = current();
+        if (w == null) {
+            throw new IllegalStateException(
+                "Operation outside Scheduler thread"
+            );
+        }
+        Scheduler s = findScheduler(w);
+        if (s.logging) {
+            s.log.add((char) ('A' + w.id) + "  " + operation);
+        }
+    }
+
+    private static Scheduler findScheduler(Worker w) {
+        return CURRENT_SCHEDULER.get();
+    }
+
+    private static final ThreadLocal<Scheduler> CURRENT_SCHEDULER =
+        new ThreadLocal<>();
+
     public static void point() {
-        throw new UnsupportedOperationException("TODO этап 1: Scheduler.point");
+        current().touched = true;
+        record("window");
     }
 
-    /** Ждать, пока cond не станет true. До этого поток не попадает в enabled. */
     public static void await(BooleanSupplier cond) {
-        throw new UnsupportedOperationException("TODO этап 1: Scheduler.await");
+        Worker w = current();
+        while (!cond.getAsBoolean()) {
+            w.touched = false;
+            w.permit.release();
+            w.permit.acquireUninterruptibly();
+        }
     }
 }
