@@ -29,6 +29,7 @@ public final class Scheduler {
         boolean touched;
         boolean blocked;
         SchedLock waitingFor;
+        BooleanSupplier waitingCondition;
 
         Worker(int id, Runnable body) {
             this.id = id;
@@ -59,6 +60,7 @@ public final class Scheduler {
                 CURRENT_SCHEDULER.set(this);
                 try {
                     yieldTurn(w);
+                    w.touched = true;
                     w.body.run();
                 } catch (DeadlockAbort ignored) {
                 } finally {
@@ -69,6 +71,16 @@ public final class Scheduler {
                 }
             });
             w.thread.start();
+        }
+
+        for (Worker w : workers) {
+            w.permit.release();
+            try {
+                schedulerSem.acquire();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(e);
+            }
         }
 
         int last = -1;
@@ -115,6 +127,7 @@ public final class Scheduler {
                 Thread.currentThread().interrupt();
                 throw new RuntimeException(e);
             }
+            refreshConditionWaiters();
         }
 
         for (Worker w : workers) {
@@ -123,6 +136,16 @@ public final class Scheduler {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new RuntimeException(e);
+            }
+        }
+    }
+
+    private void refreshConditionWaiters() {
+        for (Worker w : workers) {
+            if (!w.finished && w.blocked && w.waitingCondition != null
+                    && w.waitingCondition.getAsBoolean()) {
+                w.blocked = false;
+                w.waitingCondition = null;
             }
         }
     }
@@ -215,10 +238,23 @@ public final class Scheduler {
 
     public static void await(BooleanSupplier cond) {
         Worker w = current();
-        while (!cond.getAsBoolean()) {
-            w.touched = false;
-            w.permit.release();
+        boolean pauseForPriorAccess = w.touched;
+        w.touched = false;
+        if (pauseForPriorAccess && cond.getAsBoolean()) {
+            CURRENT_SCHEDULER.get().schedulerSem.release();
             w.permit.acquireUninterruptibly();
+            if (CURRENT_SCHEDULER.get().deadlock != null) throw new DeadlockAbort();
         }
+        while (!cond.getAsBoolean()) {
+            w.blocked = true;
+            w.waitingCondition = cond;
+            CURRENT_SCHEDULER.get().schedulerSem.release();
+            w.permit.acquireUninterruptibly();
+            if (CURRENT_SCHEDULER.get().deadlock != null) throw new DeadlockAbort();
+            w.blocked = false;
+            w.waitingCondition = null;
+        }
+        record("await done");
+        w.touched = true;
     }
 }
