@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="org.example.StressTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-09-29T15:09:16.522Z" hostname="MacBook-Pro-106.local" time="0.515">
+  <properties/>
+  <testcase name="[1] org.example.collectors.LockStripingCollector@4d098f9b" classname="org.example.StressTest" time="0.16"/>
+  <testcase name="[2] org.example.collectors.ThreadLocalCollector@2b62442c" classname="org.example.StressTest" time="0.129"/>
+  <testcase name="[3] org.example.collectors.DoubleBufferCollector@841e575" classname="org.example.StressTest" time="0.152"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[сент. 29, 2026 6:09:16 PM org.example.StressTest stressTest
+INFO: LockStripingCollector: broken snapshots=9185/10000 (91,85%), sum < count=8907, sum > count=278, final count - writer calls=0
+сент. 29, 2026 6:09:16 PM org.example.StressTest stressTest
+INFO: ThreadLocalCollector: broken snapshots=6139/10000 (61,39%), sum < count=6059, sum > count=80, final count - writer calls=0
+сент. 29, 2026 6:09:17 PM org.example.StressTest stressTest
+INFO: DoubleBufferCollector: broken snapshots=0/10000 (0,00%), sum < count=0, sum > count=0, final count - writer calls=0
+]]></system-err>
+</testsuite>
