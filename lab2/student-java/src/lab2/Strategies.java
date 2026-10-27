@@ -20,22 +20,32 @@ public final class Strategies {
 
     /** Проигрывает трассу: на i-м решении выбирает поток trace[i] ('A' -> 0, 'B' -> 1). */
     public static final class Replay implements Strategy {
-        public Replay(String trace) { }
+        private final String trace;
+        private int position;
+        public Replay(String trace) { this.trace = trace; }
 
         /** Сбросить позицию в трассе перед прогоном. */
-        public void beginRun() { }
+        public void beginRun() { position = 0; }
 
         public int pick(List<Integer> enabled, int last) {
-            throw new UnsupportedOperationException("TODO этап 2: Replay.pick");
+            // A replay may stop exactly when the selected execution has reached
+            // a deadlock (the final lock attempts need no further choice).
+            if (position >= trace.length()) return -1;
+            int id = trace.charAt(position++) - 'A';
+            if (!enabled.contains(id)) throw new IllegalArgumentException("Replay selected disabled thread " + trace.charAt(position - 1));
+            return id;
         }
     }
 
     /** Случайный поток: enabled.get(rnd.nextInt(enabled.size())), rnd = new java.util.Random(seed). */
     public static final class RandomPick implements Strategy {
-        public RandomPick(long seed) { }
+        private final java.util.Random rnd;
+
+        public RandomPick(long seed) { rnd = new java.util.Random(seed); }
 
         public int pick(List<Integer> enabled, int last) {
-            throw new UnsupportedOperationException("TODO этап 3: RandomPick.pick");
+            if (enabled.isEmpty()) throw new IllegalStateException("No enabled threads");
+            return enabled.get(rnd.nextInt(enabled.size()));
         }
     }
 
